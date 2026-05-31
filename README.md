@@ -11,7 +11,7 @@ MIT
 
 ### Optimization
 
-Bench: inference with 32 tokens prefill, 500 tokens generated
+Bench: inference with 8 tokens prefill, 24 tokens generated
 
 Initial bench: 0.987s (506.6 tok/s)
 
@@ -19,6 +19,4 @@ The initial `generate` function, corresponding to this [repo](https://github.com
 - At each call, re-computes the key and value matrices for all the tokens in the context. A more efficient approach would be to cache these matrices and reuse them for each call.
 - At each call, fetch the logits for all the tokens in the context. A more efficient approach would be to fetch the logits for only the last token and discard the rest.
 
-- [ ] KV caching optimization during inference 
-- [ ] don't need fetch all the logits during every forward pass
-- [ ] split prefill and encode generation steps
+New bench: inference: 0.021s (1165.0 tok/s)

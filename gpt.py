@@ -62,6 +62,16 @@ def estimate_loss():
     model.train()
     return out
 
+class KVCache:
+    def __init__(self):
+        self.k = self.v = None
+    def __len__(self):
+        return 0 if self.k is None else self.k.shape[1]
+    def update(self, k, v):
+        self.k = k if self.k is None else torch.cat((self.k, k), dim=1)
+        self.v = v if self.v is None else torch.cat((self.v, v), dim=1)
+        return self.k, self.v
+
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -74,19 +84,23 @@ class Head(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
         # input of size (batch, time-step, channels)
         # output of size (batch, time-step, head size)
         B,T,C = x.shape
         k = self.key(x)   # (B,T,hs)
         q = self.query(x) # (B,T,hs)
+        v = self.value(x) # (B,T,hs)
+        if cache is not None:
+            k, v = cache.update(k, v)   # k,v now (B, Tk, hs) — full history
         # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
-        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        Tq, Tk = q.shape[1], k.shape[1]
+        past = Tk - Tq                                  # how many keys precede the new queries
+        wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5  # (B, Tq, Tk)
+        wei = wei.masked_fill(self.tril[past:past+Tq, :Tk] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1) # (B, T, T)
         wei = self.dropout(wei)
         # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,hs)
         out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
         return out
 
@@ -99,8 +113,9 @@ class MultiHeadAttention(nn.Module):
         self.proj = nn.Linear(head_size * num_heads, n_embd)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        out = torch.cat([h(x) for h in self.heads], dim=-1)
+    def forward(self, x, layer_cache=None):
+        layer_cache = layer_cache or [None] * len(self.heads)
+        out = torch.cat([h(x, c) for h, c in zip(self.heads, layer_cache)], dim=-1)
         out = self.dropout(self.proj(out))
         return out
 
@@ -131,8 +146,8 @@ class Block(nn.Module):
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x):
-        x = x + self.sa(self.ln1(x))
+    def forward(self, x, layer_cache=None):
+        x = x + self.sa(self.ln1(x), layer_cache)
         x = x + self.ffwd(self.ln2(x))
         return x
 
@@ -158,14 +173,19 @@ class GPTLanguageModel(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, kv_cache=None):
         B, T = idx.shape
-
+        # how many tokens are already cached (0 during training/prefill)
+        past_len = len(kv_cache[0][0]) if kv_cache else 0
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        # positions start AFTER what's cached, not at 0
+        pos_emb = self.position_embedding_table(torch.arange(past_len, past_len + T, device=device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
-        x = self.blocks(x) # (B,T,C)
+        # iterate blocks manually; cache objects mutate in place
+        kv_cache = kv_cache or [None] * len(self.blocks)
+        for blk, c in zip(self.blocks, kv_cache):
+            x = blk(x, c)
         x = self.ln_f(x) # (B,T,C)
 
 
@@ -185,20 +205,22 @@ class GPTLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
+        # init cache
+        kv_cache = [[KVCache() for _ in range(n_head)] for _ in range(n_layer)]
         # prefill
-        logits, _, kv_cache = self(idx, kv_cache=None)
+        logits, _ = self(idx, kv_cache=kv_cache)
         # apply softmax to get probabilities
         probs = F.softmax(logits, dim=-1) # (B, C)
         # sample from the distribution
         idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
         # append sampled index to the running sequence
         idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
-
+        # decode
         for _ in range(max_new_tokens):
             # crop idx to the last token
             idx_cond = idx[:, -1:]
             # get the predictions
-            logits, _, kv_cache = self(idx_cond, kv_cache)
+            logits, _ = self(idx_cond, kv_cache=kv_cache)
             # apply softmax to get probabilities
             probs = F.softmax(logits, dim=-1) # (B, C)
             # sample from the distribution
@@ -227,15 +249,15 @@ for iter in range(max_iters):
     xb, yb = get_batch('train')
 
     # evaluate the loss
-    logits, loss, kv_cache = model(xb, yb, kv_cache=None)
+    logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
 # generate from the model
-prefill_tokens = 32
+prefill_tokens = 8
 context = val_data[:prefill_tokens].unsqueeze(0).to(device)
-max_new_tokens = 500
+max_new_tokens = 24
 if device == 'cuda':
     torch.cuda.synchronize()
 t0 = time.perf_counter()
