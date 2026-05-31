@@ -13,7 +13,7 @@ MIT
 
 Bench: inference with 8 tokens prefill, 24 tokens generated
 
-Initial bench: 0.987s (506.6 tok/s)
+Initial bench: inference: 0.047s (512.1 tok/s)
 
 The initial `generate` function, corresponding to this [repo](https://github.com/karpathy/ng-video-lecture), is ineffiicent for two reasons:
 - At each call, re-computes the key and value matrices for all the tokens in the context. A more efficient approach would be to cache these matrices and reuse them for each call.
