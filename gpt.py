@@ -167,11 +167,15 @@ class GPTLanguageModel(nn.Module):
         x = tok_emb + pos_emb # (B,T,C)
         x = self.blocks(x) # (B,T,C)
         x = self.ln_f(x) # (B,T,C)
-        logits = self.lm_head(x) # (B,T,vocab_size)
+
 
         if targets is None:
+            # only fetch the logits for the last token
+            logits = self.lm_head(x[:, -1, :]) # (B,vocab_size) -> (B, C)
             loss = None
         else:
+            # fetch the logits for all the tokens
+            logits = self.lm_head(x) # (B,T,vocab_size)
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
@@ -181,19 +185,27 @@ class GPTLanguageModel(nn.Module):
 
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
+        # prefill
+        logits, _, kv_cache = self(idx, kv_cache=None)
+        # apply softmax to get probabilities
+        probs = F.softmax(logits, dim=-1) # (B, C)
+        # sample from the distribution
+        idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+        # append sampled index to the running sequence
+        idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+
         for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens
-            idx_cond = idx[:, -block_size:]
+            # crop idx to the last token
+            idx_cond = idx[:, -1:]
             # get the predictions
-            logits, loss = self(idx_cond)
-            # focus only on the last time step
-            logits = logits[:, -1, :] # becomes (B, C)
+            logits, _, kv_cache = self(idx_cond, kv_cache)
             # apply softmax to get probabilities
             probs = F.softmax(logits, dim=-1) # (B, C)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        
         return idx
 
 model = GPTLanguageModel()
@@ -215,7 +227,7 @@ for iter in range(max_iters):
     xb, yb = get_batch('train')
 
     # evaluate the loss
-    logits, loss = model(xb, yb)
+    logits, loss, kv_cache = model(xb, yb, kv_cache=None)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
