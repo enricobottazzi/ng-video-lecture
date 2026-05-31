@@ -8,3 +8,13 @@ NOTE: sadly I did not go too much into model initialization in the video lecture
 ### License
 
 MIT
+
+### Optimization
+
+- [ ] KV caching optimization during inference 
+- [ ] don't need fetch all the logits during every forward pass
+- [ ] split prefill and encode generation steps
+
+Bench: inference with 32 tokens prefill, 500 tokens generated
+
+Initial bench: 0.987s (506.6 tok/s)

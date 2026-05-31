@@ -1,18 +1,19 @@
+import time
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
 # hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
-max_iters = 5000
+batch_size = 8 # how many independent sequences will we process in parallel?
+block_size = 32 # what is the maximum context length for predictions?
+max_iters = 100
 eval_interval = 500
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
 n_head = 6
-n_layer = 6
+n_layer = 1
 dropout = 0.2
 # ------------
 
@@ -220,6 +221,16 @@ for iter in range(max_iters):
     optimizer.step()
 
 # generate from the model
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+prefill_tokens = 32
+context = val_data[:prefill_tokens].unsqueeze(0).to(device)
+max_new_tokens = 500
+if device == 'cuda':
+    torch.cuda.synchronize()
+t0 = time.perf_counter()
+output = m.generate(context, max_new_tokens=max_new_tokens)
+if device == 'cuda':
+    torch.cuda.synchronize()
+inference_s = time.perf_counter() - t0
+print(f"inference: {inference_s:.3f}s ({max_new_tokens / inference_s:.1f} tok/s)")
+print(decode(output[0].tolist()))
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
